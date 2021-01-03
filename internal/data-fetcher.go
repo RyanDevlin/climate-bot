@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"fmt"
@@ -67,7 +67,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	cache.FtpGetTimestamp("co2_weekly_mlo.csvs")
+	cache.FtpGetTimestamp("co2_weekly_mlo.csv")
 
 	//remote_buf := Quickdial_ftp(ftp_default_server, Weekly_co2_mlo_path)
 	/*data, err := ioutil.ReadFile(weekly_file)
