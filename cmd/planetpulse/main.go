@@ -1,12 +1,35 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"os/user"
+	//data "github.com/RyanDevlin/planet-pulse/internal/data"
 
-	"github.com/RyanDevlin/planet-pulse/internal"
+	"fmt"
+
+	"github.com/RyanDevlin/planet-pulse/pkg/ftpmachine"
 )
+
+func main() {
+	server := ftpmachine.FTPServer{
+		Hostname:    "aftp.cmdl.noaa.gov",
+		Username:    "anonymous",
+		Password:    "anonymous",
+		Connections: 0,
+	}
+
+	ftpmachine := ftpmachine.FTPMachine{
+		Server: server,
+		Cache:  ftpmachine.FTPCache{},
+	}
+
+	data, err := ftpmachine.Server.Get("co2_weekly_mlo.txt", "products/")
+	if err != nil {
+		fmt.Println("Couldn't find file")
+	}
+
+	fmt.Println(string(data))
+}
+
+/*
 
 const (
 	// This is the name of the cache that will be created in the user's home dir
@@ -33,7 +56,7 @@ func main() {
 
 	cachedir := usr.HomeDir + "/" + cachename
 
-	cache, err := internal.CreateCache(cachedir, sitemap)
+	cache, err := data.CreateCache(cachedir, sitemap)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -44,15 +67,16 @@ func main() {
 	}
 
 	fmt.Println("TIMESTAMP:", result)
-	/*remote_buf := internal.Quickdial_ftp(ftp_default_server, Weekly_co2_mlo_path)
-	data, err := ioutil.ReadFile(weekly_file)
-	if err != nil {
-		fmt.Println("File reading error", err)
-		return
-	}
-	fmt.Println("Contents of file:", string(data))
-	*/
+//	remote_buf := data.Quickdial_ftp(ftp_default_server, Weekly_co2_mlo_path)
+//	data, err := ioutil.ReadFile(weekly_file)
+//	if err != nil {
+//		fmt.Println("File reading error", err)
+//		return
+	//}
+	//fmt.Println("Contents of file:", string(data))
+
 
 	//fmt.Println(string(remote_buf[0]))
 	//create_cache()
 }
+*/

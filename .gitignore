@@ -6,6 +6,7 @@
 # Repo specific
 *.csv
 *.txt
+*.secret
 
 # User-specific files
 *.rsuser
