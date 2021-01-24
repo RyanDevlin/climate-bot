@@ -54,7 +54,7 @@ func (e *FTPError) Error() string {
 }
 
 // ========================= MAIN ========================= //
-func main() {
+func stuff() {
 	// Grab the current user
 	usr, err := user.Current()
 	if err != nil {
