@@ -26,12 +26,12 @@ func main() {
 		Cache:  ftpmachine.FTPCache{},
 	}
 
-	data, err := ftpmachine.Server.Get("co2_weekly_mlo.txt", "products/")
+	data, err := ftpmachine.Server.Get("co2_weekly_mlo.txt", "/products/")
 	if err != nil {
-		fmt.Println("Couldn't find file")
+		fmt.Println(err)
 	}
 
-	fmt.Println(string(data))
+	fmt.Println(string(data[0]))
 }
 
 /*
