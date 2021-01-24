@@ -1,11 +1,11 @@
 package ftpmachine
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,11 +23,14 @@ about the intricacies of the jlaffaye/ftp library.
 
 // FTPServer represents a remote FTP server
 type FTPServer struct {
-	Hostname    string
-	Username    string
-	Password    string
-	Timeout     int // This should be optional
-	Connections int32
+	Hostname      string
+	Username      string
+	Password      string
+	Timeout       int        // This should be optional
+	ConnectionID  int32      // The unique ID of a new runtime connection. Is incremented each time we make a new connection.
+	Connections   chan int32 // A buffer used to limit the number of concurrent connections
+	HaltSearch    chan bool  // A channel to signal the program to stop searching the server
+	CancelPending chan bool  // A channel used to cancel all pending server connections
 }
 
 // FTPCache represents a local cache of FTP data
@@ -61,12 +64,10 @@ func (server *FTPServer) Get(filename string, path string) ([]byte, error) {
 	data, err := server.getFile(filename, path)
 	if ferror.ErrorLog(err) {
 
-		ch := make(chan string)
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go server.Search(filename, path, ch, wg)
+		result := make(chan string)
+		go server.Search(filename, path, result)
 
-		truePath := <-ch
+		truePath := <-result
 		fmt.Println("TRUEPATH: ", truePath)
 		data, err := server.getFile(filename, truePath)
 		if ferror.ErrorLog(err) {
@@ -83,7 +84,7 @@ func (server *FTPServer) Get(filename string, path string) ([]byte, error) {
 // provided path for the file. It returns the path to the file if found.
 // If no path is provided, this searches all sub-paths from the root of the server.
 // If no path is found this returns an error.
-func (server *FTPServer) Search(filename string, path string, ch chan string, wg sync.WaitGroup) {
+func (server *FTPServer) Search(filename string, path string, result chan string) {
 	// TODO: filename and path validation. For path validation try filepath.Clean
 	// TODO: Add error logging and handling. If file not found,
 	// should log that. If verbosity is on, list all paths searched..
@@ -98,34 +99,44 @@ func (server *FTPServer) Search(filename string, path string, ch chan string, wg
 	// immediately end after obtaining their map. We should ensure this
 	// function DOES NOT hold the connection open while it does other processing.
 
-	defer wg.Done()
-	fmt.Println("SEARCHING: ", path)
-	list, err := server.ftpList(path)
-	if err != nil {
-		log.Fatal("UH OH")
-	}
-
-	for _, entry := range list {
-		if entry.Name == filename {
-			ch <- filepath.Join(path)
-			return
+	select {
+	case <-server.HaltSearch: // If one of the goroutines found the file, the halt channel will close which will unblock the case and immediately halt the search
+		return
+	default:
+		fmt.Println("SEARCHING: ", path)
+		list, err := server.ftpList(path)
+		if err != nil {
+			ferror.InfoLog(err.Error()) // TODO: Proper error handling
 		}
-		if entry.Type == ftp.EntryTypeFolder {
-			subPath := filepath.Join(path, entry.Name)
-			//wg.Add(int(atomic.LoadInt32(&server.Connections)))
-			wg.Add(1)
-			go server.Search(filename, subPath, ch, wg)
+
+		for _, entry := range list {
+			if entry.Name == filename {
+				fmt.Println("==== FOUND IT: ", filepath.Join(path))
+				result <- filepath.Join(path)
+				close(server.HaltSearch) // Stop searching
+				//close(server.CancelPending) // Cancel all pending server connections
+				for i := 0; i < int(atomic.LoadInt32(&server.ConnectionID)); i++ {
+					server.CancelPending <- true
+				}
+				return
+			}
+			if entry.Type == ftp.EntryTypeFolder {
+				subPath := filepath.Join(path, entry.Name)
+				go server.Search(filename, subPath, result)
+			}
 		}
 	}
-
-	//fmt.Println("FOUND: ", list[0].Type)
 
 	return
 }
 
 func (server *FTPServer) ftpList(path string) ([]*ftp.Entry, error) {
 	// Establish FTP connection
-	c := server.ftpConnect()
+	c, err := server.ftpConnect()
+	if err != nil {
+		return nil, err
+	}
+
 	defer server.ftpDisconnect(c)
 
 	list, err := c.List(path)
@@ -151,7 +162,10 @@ func (server *FTPServer) GetTimestamp(filename string, path string) (time.Time, 
 func (server *FTPServer) ftpTimestamp(filename string, path string) (time.Time, error) {
 	var zeroVal time.Time
 	// Establish FTP connection
-	c := server.ftpConnect()
+	c, err := server.ftpConnect()
+	if err != nil {
+		return zeroVal, err
+	}
 
 	dir := "products/trends/co2/" // TODO: Fix this obviously
 
@@ -177,7 +191,10 @@ func (server *FTPServer) getFile(filename string, path string) ([]byte, error) {
 	filePath := filepath.Join(path, filename)
 
 	// Establish FTP connection
-	c := server.ftpConnect() // TODO: Server connections with the jlaffaye/ftp library do not support concurrency
+	c, err := server.ftpConnect() // TODO: Server connections with the jlaffaye/ftp library do not support concurrency
+	if err != nil {
+		return nil, err
+	}
 
 	// Pull down the file
 	r, err := c.Retr(filePath)
@@ -191,30 +208,41 @@ func (server *FTPServer) getFile(filename string, path string) ([]byte, error) {
 	return buf, nil
 }
 
-func (server *FTPServer) ftpConnect() *ftp.ServerConn {
+func (server *FTPServer) ftpConnect() (*ftp.ServerConn, error) {
 	// TODO: Validate hostname
 	// This FTP library requires the port appended
+	id := atomic.AddInt32(&server.ConnectionID, 1)
+	for {
+		select {
+		case <-server.CancelPending: // If one of the goroutines found the file, the halt channel will close which will unblock the case and immediately halt the search
+			//atomic.AddInt32(&server.ConnectionID, -1) // Never used ID so decrease
+			fmt.Println("Killing: ", len(server.Connections))
+			return nil, errors.New("Cancelled connection for Job ID: " + fmt.Sprint(id))
+		case server.Connections <- id:
 
-	atomic.AddInt32(&server.Connections, 1)
-	fmt.Println("Connection: ", server.Connections)
+			fmt.Println("New connection established for Job ID: ", id)
+			fmt.Println("Buffer Channel: ", len(server.Connections))
 
-	dialAddr := server.Hostname + ":21"
-	c, err := ftp.Dial(dialAddr)
-	if err != nil { // TODO: integrate with error handling
+			dialAddr := server.Hostname + ":21"
+			c, err := ftp.Dial(dialAddr)
+			if err != nil { // TODO: integrate with error handling
 
-		log.Fatal(err)
+				log.Fatal(err)
+			}
+
+			// Log in anonymously
+			err = c.Login(server.Username, server.Password)
+			if err != nil {
+				log.Fatal(err)
+			}
+			return c, nil
+		}
 	}
-
-	// Log in anonymously
-	err = c.Login(server.Username, server.Password)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return c
 }
 
 func (server *FTPServer) ftpDisconnect(c *ftp.ServerConn) {
-	atomic.AddInt32(&server.Connections, -1)
-	fmt.Println("Disconnection: ", server.Connections)
+	atomic.AddInt32(&server.ConnectionID, -1)
+	id := <-server.Connections
+	fmt.Println("Disconnection for Job ID: ", id)
 	c.Quit()
 }

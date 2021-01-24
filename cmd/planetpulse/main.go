@@ -8,12 +8,17 @@ import (
 	"github.com/RyanDevlin/planet-pulse/pkg/ftpmachine"
 )
 
+const MaxConnections = 5
+
 func main() {
 	server := ftpmachine.FTPServer{
-		Hostname:    "aftp.cmdl.noaa.gov",
-		Username:    "anonymous",
-		Password:    "anonymous",
-		Connections: 0,
+		Hostname:      "aftp.cmdl.noaa.gov",
+		Username:      "anonymous",
+		Password:      "anonymous",
+		ConnectionID:  0,
+		Connections:   make(chan int32, MaxConnections),
+		HaltSearch:    make(chan bool),
+		CancelPending: make(chan bool),
 	}
 
 	ftpmachine := ftpmachine.FTPMachine{
