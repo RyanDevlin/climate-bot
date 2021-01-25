@@ -6,7 +6,8 @@ import (
 	"github.com/RyanDevlin/planet-pulse/pkg/ftpmachine"
 )
 
-func planetPulse() {
+func PlanetPulse() {
+	// Create a representation of our FTP server
 	server := ftpmachine.FTPServer{
 		Hostname:      "aftp.cmdl.noaa.gov",
 		Username:      "anonymous",
@@ -22,10 +23,10 @@ func planetPulse() {
 		Cache:  ftpmachine.FTPCache{},
 	}
 
-	data, err := ftpmachine.Server.Get("co2_weekly_mlo.txt", "/products/")
+	data, err := ftpmachine.Server.Get("co2_weekly_mlo.txt", "/products/trends/co2")
 	if err != nil {
 		fmt.Println(err)
 	}
 
-	fmt.Println(string(data[0]))
+	fmt.Println(string(data))
 }
