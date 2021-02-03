@@ -8,11 +8,17 @@ import (
 
 func PlanetPulse() {
 	machine, err := ftpmachine.NewFTPMachine("aftp.cmdl.noaa.gov", "anonymous", "anonymous", 5)
-	data, err := machine.Server.Get("co2_weekly_mlo.txt", "/products/trends/")
+	data, err := machine.Server.Get("co2_weekly_mlo.txt", "products/trends/co2")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	/*
+		ftpEntry, err := machine.Server.GetMeta("co2_weekly_mlo.txt", "products/trends/")
+		if err != nil {
+			fmt.Println(err)
+			return
+		}*/
 
 	fmt.Println(string(data[0]))
 
