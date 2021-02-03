@@ -8,7 +8,7 @@ import (
 
 func PlanetPulse() {
 	machine, err := ftpmachine.NewFTPMachine("aftp.cmdl.noaa.gov", "anonymous", "anonymous", 5)
-	data, err := machine.Server.Get("co2_weekly_mlo.txt", "products/trends/co2")
+	data, err := machine.Server.Get("co2_weekly_mlo.txt", "products/trends/co2", 0)
 	if err != nil {
 		fmt.Println(err)
 		return

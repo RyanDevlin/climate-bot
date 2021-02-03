@@ -118,56 +118,24 @@ func NewFTPMachine(hostname, username, password string, maxConnections int) (*FT
 	return &ftpmachine, nil
 }
 
-// This function pulls down a file from an FTP server. It automatically
-// handles searching the server if path is en empty string or if the file is not found.
-// This function will check all sub-paths under the given path. It will check the cache
-// for file data or a path before searching. Returns error if file cannot be located.
-func (server *FTPServer) Get(filename, path string) ([]byte, error) {
+// This function returns data read from offset to EOF of a file on an FTP server.
+// It automatically handles searching the server if path is en empty string or if the
+// file is not found. This function will check all sub-paths under the given path.
+// It will check the cache for file data or a path before searching. Returns error
+// if file cannot be located.
+func (server *FTPServer) Get(filename, path string, offset uint64) ([]byte, error) {
 
 	ftpEntry, err := server.GetMeta(filename, path)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := server.GetFile(ftpEntry.Name, ftpEntry.Path, false)
+	data, err := server.GetFile(ftpEntry.Name, ftpEntry.Path, false, offset)
 	if ferror.ErrorLog(err) {
 		return nil, err
 	}
 	return data, nil
 
-}
-
-// Returns data read from a file
-// Returns an error if the file was not found at the given path
-func (server *FTPServer) GetFile(filename string, path string, cancelable bool) ([]byte, error) {
-
-	// Establish FTP connection
-	conn, err := server.ftpSyncConnect(cancelable)
-	defer server.ftpDisconnect(conn)
-	if err != nil {
-		return nil, err
-	}
-
-	// Using ChangeDir as "stat" function
-	result := conn.c.ChangeDir(path)
-	if result != nil {
-		return nil, errors.New("ftpList: Error '" + path + "' does not exist on the server")
-		//return nil, errors.New("DNE")
-	}
-
-	// Because ftpSyncConnect() only returns after a connection has been established or cancelled, we can check this to throw out the request if it was cancelled
-	if conn.cancelled {
-		return nil, nil
-	}
-
-	// Pull down the file
-	r, err := conn.c.Retr(filename)
-	if err != nil {
-		return nil, err
-	}
-
-	buf, err := ioutil.ReadAll(r)
-	return buf, nil
 }
 
 // Returns metadata of a file via FTPEntry struct.
@@ -191,6 +159,39 @@ func (server *FTPServer) GetMeta(filename, path string) (FTPEntry, error) {
 	default:
 		return FTPEntry{}, errors.New("Get: Error file '" + filename + "' not found on the server")
 	}
+}
+
+// Returns data read from offset to end of a file
+// Returns an error if the file was not found at the given path
+func (server *FTPServer) GetFile(filename string, path string, cancelable bool, offset uint64) ([]byte, error) {
+
+	// Establish FTP connection
+	conn, err := server.ftpSyncConnect(cancelable)
+	defer server.ftpDisconnect(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	// Using ChangeDir as "stat" function
+	result := conn.c.ChangeDir(path)
+	if result != nil {
+		return nil, errors.New("ftpList: Error '" + path + "' does not exist on the server")
+		//return nil, errors.New("DNE")
+	}
+
+	// Because ftpSyncConnect() only returns after a connection has been established or cancelled, we can check this to throw out the request if it was cancelled
+	if conn.cancelled {
+		return nil, nil
+	}
+
+	// Pull down the file
+	r, err := conn.c.RetrFrom(filename, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := ioutil.ReadAll(r)
+	return buf, nil
 }
 
 // Given a filename, this function searches all sub-paths at the
