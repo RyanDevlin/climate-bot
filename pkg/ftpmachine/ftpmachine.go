@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"path/filepath"
 	"sync"
@@ -34,11 +33,12 @@ const connectionLimit = 65535
 // FTPServer represents a remote FTP server
 type FTPServer struct {
 	Hostname           string
+	Port               int
 	Username           string
 	Password           string
 	Timeout            int        // This should be optional
 	PendingConnections int32      // The unique ID of a new runtime connection. Is incremented each time we make a new connection. Needs to be initialized to 0 in order to properly flush pending connections.
-	Connections        chan int32 // A buffer channel semaphore used to limite the number of connections we open concurrently to the remote server
+	Connections        chan int32 // A buffer channel semaphore used to limit the number of connections we open concurrently to the remote server
 	haltSearch         chan bool  // A channel to signal the program to stop searching the server
 	cancelPending      chan bool  // A channel used to cancel all pending server connections
 	attemptedConn      int32      // Incremented with each call to ftpSyncConnect()
@@ -75,9 +75,9 @@ type CacheEntry struct {
 }
 
 type FTPMachine struct {
-	Server FTPServer
-	Cache  FTPCache
-	// Should have methods to destroy existing cache maybe
+	Server    FTPServer
+	Cache     FTPCache
+	ephemeral bool
 }
 
 // NewFTPMachine builds an FTPMachine struct representing a remote FTP server and a local cache of file data for that server.
@@ -87,12 +87,16 @@ type FTPMachine struct {
 // password: The password to authenticate to the FTP server,
 // maxConnections: The number of concurrent connections from a single IP that the remote FTP server will allow. This is usually fairly low, around 8.
 // If you are receiving “421 Too many connections” errors from the server, reduce this value and try again.
-func NewFTPMachine(hostname, username, password string, maxConnections int) (*FTPMachine, error) { // TODO: Add timeout parameter
+func NewFTPMachine(hostname string, port int, username, password string, maxConnections int, ephemeral bool) (*FTPMachine, error) { // TODO: Add timeout parameter
 	// Server parameters are validated here. It's possible to call lower level functions on their own, but this skips
 	// the variable validation performed in NewFTPMachine(), which could result in unexpected behavior.
 
 	if !isDomainName(hostname) {
 		return nil, errors.New("NewFTPMachine: Supplied hostname '" + hostname + "' is not valid.")
+	}
+
+	if port <= 0 || port > 65535 {
+		return nil, errors.New("NewFTPMachine: Supplied port number '" + fmt.Sprint(port) + "' is not valid.")
 	}
 
 	if maxConnections > connectionLimit || maxConnections < 1 {
@@ -101,6 +105,7 @@ func NewFTPMachine(hostname, username, password string, maxConnections int) (*FT
 
 	server := FTPServer{
 		Hostname:           hostname,
+		Port:               port,
 		Username:           username,
 		Password:           password,
 		PendingConnections: 0,
@@ -111,8 +116,9 @@ func NewFTPMachine(hostname, username, password string, maxConnections int) (*FT
 	}
 
 	ftpmachine := FTPMachine{
-		Server: server,
-		Cache:  FTPCache{}, // TODO: Add caching functionality
+		Server:    server,
+		Cache:     FTPCache{}, // TODO: Add caching functionality
+		ephemeral: ephemeral,
 	}
 
 	return &ftpmachine, nil
@@ -129,6 +135,7 @@ func (server *FTPServer) Get(filename, path string, offset uint64) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
+	// If timestamp doesn't match cache, pull down full file
 
 	data, err := server.GetFile(ftpEntry.Name, ftpEntry.Path, false, offset)
 	if ferror.ErrorLog(err) {
@@ -147,39 +154,35 @@ func (server *FTPServer) GetMeta(filename, path string) (FTPEntry, error) {
 	sigError := make(chan error)
 	wg := new(sync.WaitGroup)
 	wg.Add(1)
+
 	go server.search(filename, path, result, sigError, wg)
 
-	// Wait for server to be fully searched
 	wg.Wait()
 	select {
 	case ftpEntry := <-result:
 		return ftpEntry, nil
-	case err := <-sigError:
-		return FTPEntry{}, err
 	default:
 		return FTPEntry{}, errors.New("Get: Error file '" + filename + "' not found on the server")
 	}
 }
 
 // Returns data read from offset to end of a file
-// Returns an error if the file was not found at the given path
+// Returns an error if the file was not found at the given path,
+// the path doesn't exist, or if the connection had errors
 func (server *FTPServer) GetFile(filename string, path string, cancelable bool, offset uint64) ([]byte, error) {
 
-	// Establish FTP connection
 	conn, err := server.ftpSyncConnect(cancelable)
 	defer server.ftpDisconnect(conn)
 	if err != nil {
 		return nil, err
 	}
 
-	// Using ChangeDir as "stat" function
+	// ChangedDir() used as stat
 	result := conn.c.ChangeDir(path)
 	if result != nil {
 		return nil, errors.New("ftpList: Error '" + path + "' does not exist on the server")
-		//return nil, errors.New("DNE")
 	}
 
-	// Because ftpSyncConnect() only returns after a connection has been established or cancelled, we can check this to throw out the request if it was cancelled
 	if conn.cancelled {
 		return nil, nil
 	}
@@ -194,17 +197,22 @@ func (server *FTPServer) GetFile(filename string, path string, cancelable bool, 
 	return buf, nil
 }
 
+func searchAndRescue() {
+	if r := recover(); r != nil {
+		fmt.Println("Recovered from panic:", r)
+	}
+}
+
 // Given a filename, this function searches all sub-paths at the
 // provided path for the file. It returns the path to the file if found.
 // If no path is provided, this searches all sub-paths from the root of the server.
 // If no path is found this returns an error.
 func (server *FTPServer) search(filename, path string, result chan FTPEntry, sigError chan error, wg *sync.WaitGroup) {
-	// TODO: Add error logging and handling. If file not found,
-	// should log that. If verbosity is on, list all paths searched..
+	defer searchAndRescue()
 	path = filepath.Join("/", path)
 
 	select {
-	case <-server.haltSearch: // If one of the goroutines found the file, the halt channel will close which will unblock the case and immediately halt the search
+	case <-server.haltSearch: // Used to catch in-progress searches after file has been found
 		wg.Done()
 		return
 	default:
@@ -212,8 +220,7 @@ func (server *FTPServer) search(filename, path string, result chan FTPEntry, sig
 		list, err := server.ftpList(path, true)
 		if err != nil {
 			wg.Done()
-			sigError <- err // TODO: Proper error handling
-			return
+			panic(err) // Panic if we encounter network problems
 		}
 
 		for _, entry := range list {
@@ -232,7 +239,7 @@ func (server *FTPServer) search(filename, path string, result chan FTPEntry, sig
 				for i := 0; i < pending; i++ {
 					server.cancelPending <- true // Flushes all queued connections
 				}
-				close(server.haltSearch) // Stop searching
+				close(server.haltSearch)
 				wg.Done()
 				result <- ftpEntry
 				return
@@ -250,7 +257,6 @@ func (server *FTPServer) search(filename, path string, result chan FTPEntry, sig
 }
 
 func (server *FTPServer) ftpList(path string, cancelable bool) ([]*ftp.Entry, error) {
-	// Establish FTP connection
 	conn, err := server.ftpSyncConnect(cancelable)
 	defer server.ftpDisconnect(conn)
 	if err != nil {
@@ -261,10 +267,9 @@ func (server *FTPServer) ftpList(path string, cancelable bool) ([]*ftp.Entry, er
 		return nil, nil
 	}
 
-	// Because of the way jlaffaye/ftp was written, the List() function will not tell us if the path exists or not
-	// Instead we have to use ChangeDir to first test this, which is dumb
-	result := conn.c.ChangeDir(path)
-	if result != nil {
+	// ChangedDir() used as stat
+	err2 := conn.c.ChangeDir(path)
+	if err2 != nil {
 		return nil, errors.New("ftpList: Error '" + path + "' does not exist on the server")
 	}
 
@@ -273,21 +278,19 @@ func (server *FTPServer) ftpList(path string, cancelable bool) ([]*ftp.Entry, er
 		return nil, err
 	}
 
-	return list, err
+	return list, nil
 }
 
 func (server *FTPServer) ftpSyncConnect(cancelable bool) (*FTPConnection, error) {
-	// Increment the number of connection attempts
 	currID := atomic.AddInt32(&server.attemptedConn, 1)
 
 	connection := &FTPConnection{
 		c:         nil,
 		cancelled: false,
-		connID:    currID, // Used to mark this connection attempt with a unique ID
+		connID:    currID,
 	}
 
-	if cancelable { // This loop allows pending connection requests to be aborted by sending to the server.CancelPending channel
-		// Increment pending counter only for cancelable requests
+	if cancelable { // Sending to server.CancelPending channel will abort cancelable requests
 		atomic.AddInt32(&server.PendingConnections, 1)
 		for {
 			select {
@@ -295,11 +298,16 @@ func (server *FTPServer) ftpSyncConnect(cancelable bool) (*FTPConnection, error)
 				atomic.AddInt32(&server.PendingConnections, -1)
 				connection.cancelled = true
 				return connection, nil
-			case server.Connections <- int32(connection.connID): // Buffered channel semaphore to limit the number of concurrent connections
+			case server.Connections <- int32(connection.connID):
 				atomic.AddInt32(&server.PendingConnections, -1)
 				conn, err := server.ftpConnect(connection)
+				if err != nil {
+					id := <-server.Connections
+					fmt.Println("Connection #", id, "failed") // TODO: integrate with error handling
+					return nil, err
+				}
 				connection.c = conn
-				return connection, err
+				return connection, nil
 			}
 		}
 	}
@@ -313,22 +321,23 @@ func (server *FTPServer) ftpSyncConnect(cancelable bool) (*FTPConnection, error)
 
 func (server *FTPServer) ftpConnect(connection *FTPConnection) (*ftp.ServerConn, error) {
 
-	dialAddr := net.JoinHostPort(server.Hostname, "21") // jlaffaye/ftp requires the port. TODO: maybe add a port override, although that detracts from the simplicity goal of this package.
-	c, err := ftp.Dial(dialAddr, ftp.DialWithTimeout(10*time.Second))
+	dialAddr := net.JoinHostPort(server.Hostname, fmt.Sprint(server.Port))
+	c, err := ftp.Dial(dialAddr, ftp.DialWithTimeout(2*time.Second))
 	if err != nil { // TODO: integrate with error handling
-		log.Fatal(err)
+		return nil, err
 	}
-	fmt.Println("New connection established for connection #", connection.connID)
 
-	// Log in to the FTP server
 	err = c.Login(server.Username, server.Password)
 	if err != nil {
-		log.Fatal(err) // TODO: integrate with error handling
+		return nil, err // TODO: integrate with error handling
 	}
 	return c, nil
 }
 
 func (server *FTPServer) ftpDisconnect(connection *FTPConnection) {
+	if connection == nil {
+		return
+	}
 	if !connection.cancelled {
 		id := <-server.Connections // Release connection we are done with
 		connection.c.Quit()
@@ -340,7 +349,6 @@ func (server *FTPServer) ftpDisconnect(connection *FTPConnection) {
 
 // This beautiful function was completely stolen from golang.org/src/net/dnsclient.go
 // Thank you golang team for your magical open source code :)
-
 func isDomainName(s string) bool {
 	// See RFC 1035, RFC 3696.
 	// Presentation format has dots before every label except the first, and the
